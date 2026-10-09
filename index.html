@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Test de trajet</title>
+<style>
+:root{
+  --bg:#eef3f2; --card:#ffffff; --ink:#0f2e33; --sub:#4f6b70;
+  --line:#0f5c66; --bad:#c0533e; --ok:#2f9e6f; --grid:#d7e3e1;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg); color:var(--ink);
+  font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+  padding:18px; padding-top:calc(18px + env(safe-area-inset-top,0px));
+}
+h1{font-size:1.3rem;margin:0 0 2px}
+p.sub{margin:0 0 18px;color:var(--sub);font-size:.85rem}
+.status{display:flex;align-items:center;gap:8px;justify-content:center;margin-bottom:14px;font-weight:600}
+.dot{width:10px;height:10px;border-radius:50%;background:#9bb}
+.dot.off{background:#9aa5a6}
+.dot.on{background:var(--ok)}
+.dot.warn{background:#c98a2c}
+#btn{
+  display:block;width:180px;height:180px;margin:0 auto 14px;border-radius:50%;
+  background:var(--line);color:#fff;font-size:1.3rem;font-weight:700;border:6px solid #c8dbdb;
+}
+#btn.running{background:var(--bad)}
+.hint{text-align:center;color:var(--sub);font-size:.82rem;margin-bottom:18px}
+.msg{background:#fdeee9;color:var(--bad);border-radius:10px;padding:10px 12px;font-size:.85rem;text-align:center;margin-bottom:16px;display:none}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}
+.card{background:var(--card);border-radius:14px;padding:12px;border:1px solid var(--grid)}
+.card b{display:block;font-size:1.25rem}
+.card span{color:var(--sub);font-size:.78rem}
+.marks{margin-bottom:16px}
+.marks h2{font-size:.95rem;margin:0 0 8px}
+.markrow{display:flex;gap:8px;margin-bottom:8px}
+.markrow input{flex:1;padding:10px;border-radius:10px;border:1px solid var(--grid);font-size:.9rem}
+.markrow button{padding:10px 14px;border-radius:10px;border:none;background:var(--line);color:#fff;font-weight:600}
+ul.list{list-style:none;padding:0;margin:0;font-size:.82rem;color:var(--sub)}
+ul.list li{padding:6px 0;border-bottom:1px solid var(--grid)}
+textarea{width:100%;min-height:140px;border-radius:10px;border:1px solid var(--grid);padding:10px;font-family:monospace;font-size:.72rem}
+.copybtn{margin-top:8px;padding:10px 14px;border-radius:10px;border:none;background:var(--card);border:1px solid var(--grid);font-weight:600}
+</style>
+</head>
+<body>
+<h1>Test de trajet — Tunis (simulation)</h1>
+<p class="sub">Relevé GPS indépendant, à ne pas mélanger avec les données Tipaza–beldj.</p>
+
+<div class="status"><span class="dot off" id="statusDot"></span><span id="statusText">Prêt</span></div>
+<button id="btn">Démarrer</button>
+<p class="hint">Garde cette page ouverte, au premier plan, écran allumé, pendant tout le trajet.</p>
+<div class="msg" id="msg"></div>
+
+<div class="grid">
+  <div class="card"><b id="dur">0 s</b><span>Durée</span></div>
+  <div class="card"><b id="dist">0 m</b><span>Distance</span></div>
+  <div class="card"><b id="net">Inconnu</b><span>Réseau</span></div>
+  <div class="card"><b id="acc">-</b><span>Précision GPS</span></div>
+  <div class="card"><b id="pts">0</b><span>Points relevés</span></div>
+  <div class="card"><b id="noNet">-</b><span>Sans réseau</span></div>
+</div>
+
+<div class="marks">
+  <h2>Marquer un lieu</h2>
+  <div class="markrow">
+    <input id="markName" placeholder="Nom du repère" />
+    <button id="markBtn">Marquer</button>
+  </div>
+  <ul class="list" id="markList"></ul>
+</div>
+
+<div>
+  <h2 style="font-size:.95rem;margin:0 0 8px">Rapport (copiable)</h2>
+  <textarea id="report" readonly></textarea>
+  <button class="copybtn" id="copyBtn">Copier le rapport</button>
+</div>
+
+<script>
+let watchId = null, wakeLock = null, running = false;
+let startTime = 0, points = [], marks = [], noNetSeconds = 0, lastT = null;
+let lastOnline = navigator.onLine;
+
+const dot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const btn = document.getElementById('btn');
+const msg = document.getElementById('msg');
+
+function fmtDur(s){
+  const m = Math.floor(s/60), sec = Math.floor(s%60);
+  return m>0 ? `${m} min ${sec}s` : `${sec}s`;
+}
+function fmtDist(m){
+  return m >= 1000 ? (m/1000).toFixed(2)+' km' : Math.round(m)+' m';
+}
+function haversine(a,b){
+  const R=6371000, toRad=x=>x*Math.PI/180;
+  const dLat=toRad(b.lat-a.lat), dLon=toRad(b.lon-a.lon);
+  const s=Math.sin(dLat/2)**2+Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+
+async function start(){
+  if(!navigator.geolocation){
+    showMsg('Géolocalisation non disponible sur ce navigateur.');
+    return;
+  }
+  points = []; marks = []; noNetSeconds = 0; lastT = null;
+  startTime = Date.now();
+  running = true;
+  btn.textContent = 'Arrêter';
+  btn.classList.add('running');
+  dot.className = 'dot on';
+  statusText.textContent = 'En cours';
+  document.getElementById('markList').innerHTML = '';
+
+  try{ wakeLock = await navigator.wakeLock.request('screen'); }catch(e){}
+
+  watchId = navigator.geolocation.watchPosition(onPos, onErr, {
+    enableHighAccuracy:true, maximumAge:0, timeout:10000
+  });
+
+  tick();
+}
+
+function tick(){
+  if(!running) return;
+  const elapsed = (Date.now()-startTime)/1000;
+  document.getElementById('dur').textContent = fmtDur(elapsed);
+  if(!navigator.onLine) noNetSeconds += 1;
+  document.getElementById('noNet').textContent =
+    elapsed>0 ? Math.round(noNetSeconds/elapsed*100)+' %' : '-';
+  document.getElementById('net').textContent = navigator.onLine ? 'Actif' : 'Coupé';
+  dot.className = 'dot ' + (navigator.onLine ? 'on' : 'warn');
+  setTimeout(tick, 1000);
+}
+
+function onPos(pos){
+  const p = {
+    t: (Date.now()-startTime)/1000,
+    lat: pos.coords.latitude,
+    lon: pos.coords.longitude,
+    acc: pos.coords.accuracy,
+    net: navigator.onLine ? 'R' : 'X'
+  };
+  points.push(p);
+  document.getElementById('pts').textContent = points.length;
+  document.getElementById('acc').textContent = '±'+Math.round(p.acc)+' m';
+
+  if(points.length>1){
+    let total=0;
+    for(let i=1;i<points.length;i++) total += haversine(points[i-1],points[i]);
+    document.getElementById('dist').textContent = fmtDist(total);
+  }
+}
+function onErr(err){
+  if(err.code === err.PERMISSION_DENIED){
+    showMsg("La localisation est refusée. Dans Chrome, touche le cadenas à côté de l'adresse, autorise la position, puis relance le test.");
+  }
+}
+function showMsg(t){ msg.textContent = t; msg.style.display='block'; }
+
+function stop(){
+  running = false;
+  btn.textContent = 'Démarrer';
+  btn.classList.remove('running');
+  dot.className = 'dot off';
+  statusText.textContent = 'Prêt';
+  if(watchId !== null) navigator.geolocation.clearWatch(watchId);
+  if(wakeLock){ wakeLock.release().catch(()=>{}); wakeLock = null; }
+  buildReport();
+}
+
+btn.onclick = () => { running ? stop() : start(); };
+
+document.getElementById('markBtn').onclick = () => {
+  if(!running) return;
+  const name = document.getElementById('markName').value.trim() || ('Repère '+(marks.length+1));
+  const last = points[points.length-1];
+  if(!last) return;
+  const t = (Date.now()-startTime)/1000;
+  marks.push({name, t, lat:last.lat, lon:last.lon});
+  const li = document.createElement('li');
+  li.textContent = `${name} — ${fmtDur(t)}`;
+  document.getElementById('markList').prepend(li);
+  document.getElementById('markName').value = '';
+  buildReport();
+};
+
+function buildReport(){
+  let out = `Test de trajet — Tunis (simulation)\n`;
+  out += `Durée ${fmtDur((Date.now()-startTime)/1000)}, points ${points.length}\n\n`;
+  out += `Repères:\n`;
+  marks.forEach(m => out += `${m.name}\t${fmtDur(m.t)}\t${m.lat.toFixed(5)},${m.lon.toFixed(5)}\n`);
+  out += `\nTrace (secondes, lat, lon, reseau):\n`;
+  points.forEach(p => out += `${Math.round(p.t)}\t${p.lat.toFixed(5)}\t${p.lon.toFixed(5)}\t${p.net}\n`);
+  document.getElementById('report').value = out;
+}
+
+document.getElementById('copyBtn').onclick = () => {
+  const ta = document.getElementById('report');
+  ta.select();
+  document.execCommand('copy');
+};
+</script>
+</body>
+</html>
